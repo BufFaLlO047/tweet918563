@@ -1,0 +1,311 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: ukbd-change-email
+
+Parameters:
+  AwsCoreHttpProxy:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: "/ukbd/egress-http-proxy-url"
+  CorsOrigins:
+    Type: String
+    Default: "'*'"
+    Description: Allow Cross Origin Resource Sharing from domains eg 'https://www.britishgas.co.uk'
+  VPCSubnetIDs:
+    Description: Contains list of VPC Subnet IDs 
+    Type: 'AWS::SSM::Parameter::Value<List<String>>'
+    Default: "/ukbd/deployment/vpc-subnet-ids"
+  VPCSecurityGroupIds:
+    Type: 'AWS::SSM::Parameter::Value<List<String>>'
+    Default: "/ukbd/deployment/vpc-security-group-ids"
+  StackCode:
+    Description: Suffix applied to resources so they don't clash with production stack
+    Type: String
+    Default: ""
+  DomainHost:
+    Type: String
+    Default: "apigw001.business.bgdigitaltest.co.uk"
+  BasePath:
+    Type: String
+    Default: "/cognito"
+  CognitoPool:
+    Description: Cognito user pool to use for this environment
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/ukbd/lambda/cognito_pool_arn"
+  AllowedSourceIpCIDRs:
+    Description: IP CIDRs for white listing inbound traffic to APIs
+    Type: 'AWS::SSM::Parameter::Value<List<String>>'
+    Default: "ukbd-allowed-cidr"
+  HostAliases:
+    Description: Oracle HostAliases directory
+    Type: String
+    Default: "/tmp/HOSTALIASES"
+  PrivateLinkSSM: 
+    Description: Contains the private link for accessing SSM
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: "/ukbd/deployment/private-link-ssm"
+
+Globals:
+  Api:
+    EndpointConfiguration: REGIONAL
+    MethodSettings: [{
+        "ThrottlingRateLimit": 3,
+        "ThrottlingBurstLimit": 5,
+        "MetricsEnabled": True,
+        "DataTraceEnabled": True,
+        # On all Paths & methods
+        "ResourcePath": "/*",
+        "HttpMethod": "*",
+        "LoggingLevel": "INFO"
+    }]
+
+Resources:
+  UKBDChangeEmailApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      DefinitionBody:
+        openapi: 3.0.0
+        info:
+          description: >-
+            It helps the UKB customers to update their email address.
+          version: "1.1.0"
+          title: !Join [ "", [ "UKBD-Change-Email-Api", !Ref StackCode] ]
+        contact:
+            email: gomathi.narayanaswamy@centrica.com
+        host: !Ref DomainHost
+        basePath: !Ref BasePath
+        consumes:
+        - "application/vnd.api+json" 
+        produces:
+        - "application/vnd.api+json" 
+        schemes:
+        - "https" 
+        paths:
+          /change-email:
+            post:
+              requestBody:
+                content:
+                  application/vnd.api+json:
+                    schema:
+                      $ref: '#/components/schemas/EmailChange'
+                description: Details of new email to change to
+                required: true
+              responses:
+                '200':
+                  description: >-
+                    Email change success
+                '400':
+                  description: >-
+                    Bad Request - Invalid request
+                    - update.email.invalid.format
+                '401':
+                  description: >-
+                      Unauthorized - if the org validation fails or event does not include subId
+                '403':
+                  description: >-
+                    Forbidden - Email already taken or invalid request
+                    - error.email.already.registered
+                    - error.email.already.used
+                    - error.same.old.new.email
+                '500':
+                  description: >-
+                    Technical errors or PI system is down
+                    - unknown.error.occured
+              security:
+                - Cognito: []
+              x-amazon-apigateway-integration:
+                responses:
+                  default:
+                    statusCode: "200"
+                uri:
+                    Fn::Join:
+                    - ''
+                    - - Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/
+                      - Fn::GetAtt:
+                        - "UKBDChangeEmail"
+                        - "Arn"
+                      -  ":live/invocations"
+                passthroughBehavior: "when_no_match"
+                httpMethod: "POST"
+                contentHandling: "CONVERT_TO_TEXT"
+                type: "aws_proxy"
+            options:
+                responses: {} 
+                x-amazon-apigateway-integration: 
+                  responses: 
+                    default: 
+                      statusCode: "200" 
+                  uri: 
+                      Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${EmailChangeOPTIONS.Arn}:live/invocations 
+                  passthroughBehavior: "when_no_match" 
+                  httpMethod: "POST" 
+                  contentHandling: "CONVERT_TO_TEXT" 
+                  type: "aws_proxy" 
+        x-amazon-apigateway-request-validator: "Validate body, query string parameters, and headers" 
+        x-amazon-apigateway-policy:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Principal: "*"
+            Action: "execute-api:Invoke"
+            Resource: "execute-api:/*/*/*"
+            Condition:
+              IpAddress:
+                aws:SourceIp: !Ref AllowedSourceIpCIDRs
+        components:
+          securitySchemes:
+            Cognito: 
+                type: "apiKey" 
+                name: "Authorization" 
+                in: "header" 
+                x-amazon-apigateway-authtype: "cognito_user_pools" 
+                x-amazon-apigateway-authorizer: 
+                  providerARNs: 
+                  - !Ref CognitoPool 
+                  type: "cognito_user_pools"
+          schemas:
+            EmailChange:
+              type: object
+              required: 
+                - data
+              additionalProperties: false
+              properties:
+                data:
+                  type: object
+                  required:
+                    - id
+                    - attributes
+                    - type
+                  additionalProperties: false
+                  properties:
+                    id:
+                      type: string
+                      example: >-
+                        me
+                    type:
+                      type: string
+                      description: Type of request
+                      enum: 
+                        - change-emails
+                    attributes:
+                      type: object
+                      required:
+                        - email
+                      additionalProperties: false
+                      properties:
+                        email:
+                          type: string
+                          description: New email address
+                          example: newEmail@domain.com
+        x-amazon-apigateway-request-validators:
+          Validate body, query string parameters, and headers:
+            validateRequestParameters: true
+            validateRequestBody: true
+          Validate query string parameters and headers:
+            validateRequestParameters: true
+            validateRequestBody: false         
+
+  UKBDChangeEmail:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      FunctionName: !Join [ "", [ "UKBDCognitoEmailChange", !Ref StackCode] ]
+      Handler: src/controller/ukbd-change-email.handler
+      Runtime: nodejs14.x
+      Description: ''
+      MemorySize: 2048
+      Timeout: 25
+      Role: 
+        !Sub arn:aws:iam::${AWS::AccountId}:role/UKBD-ServiceApp-DataMigration-Role
+      VpcConfig:
+        SubnetIds: !Ref VPCSubnetIDs
+        SecurityGroupIds: !Ref VPCSecurityGroupIds
+      Environment:
+        Variables:
+          AwsCoreHttpProxy: !Ref AwsCoreHttpProxy
+          UKBEnvPrivateLinkSSM: !Ref PrivateLinkSSM
+          CorsOrigins: !Ref CorsOrigins
+          UpdateEmailFunctionName: !Join [ "", [ "UKBDBPCPEmailChange", !Ref StackCode] ]
+      Tracing: Active
+      AutoPublishAlias: live
+      Events:
+        ChangeEmailPost:
+          Type: Api
+          Properties:
+            Path: /change-email
+            Method: post
+            RestApiId: 
+              Ref: UKBDChangeEmailApi
+        ChangeEmailOptions:
+          Type: Api
+          Properties:
+            Path: /change-email
+            Method: options
+            RestApiId: 
+              Ref: UKBDChangeEmailApi
+ 
+  UKBDBPCPEmailChange:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      FunctionName: !Join [ "", [ "UKBDBPCPEmailChange", !Ref StackCode] ]
+      Handler: src/controller/ukbd-bcp-update-email.handler
+      Runtime: nodejs14.x
+      Description: ''
+      MemorySize: 128
+      Timeout: 300
+      Role: 
+        !Sub arn:aws:iam::${AWS::AccountId}:role/UKBDServiceApp-Role
+      VpcConfig:
+        SubnetIds: !Ref VPCSubnetIDs
+        SecurityGroupIds: !Ref VPCSecurityGroupIds
+      DeadLetterQueue:
+        TargetArn: !Join [ "", [ "arn:aws:sqs:", !Ref AWS::Region, ':', !Ref AWS::AccountId, ':', 'Change-Email', !Ref StackCode, '-DLQ'] ]
+        Type: SQS
+      Environment:
+        Variables:
+          AwsCoreHttpProxy: !Ref AwsCoreHttpProxy
+          CorsOrigins: !Ref CorsOrigins
+          UKBEnvPrivateLinkSSM: !Ref PrivateLinkSSM
+      Tracing: Active
+      AutoPublishAlias: live
+
+  EmailChangeOPTIONS:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Join [ "", [ "UKBDCognitoEmailChange-OPTIONS", !Ref StackCode] ] 
+      Handler: node_modules/options/index.handler
+      AutoPublishAlias: live
+      Runtime: nodejs14.x
+      Timeout: 28
+      Role: 
+        !Sub arn:aws:iam::${AWS::AccountId}:role/UKBD-ServiceApp-DataMigration-Role
+      Environment:
+        Variables:
+          AwsCoreHttpProxy: !Ref AwsCoreHttpProxy
+          CorsOrigins: !Ref CorsOrigins
+          PrivateLinkSSM: !Ref PrivateLinkSSM
+          AllowedMethods: 'POST, OPTIONS'
+          AllowedHeaders: 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'
+      VpcConfig:
+        SubnetIds: !Ref VPCSubnetIDs
+        SecurityGroupIds: !Ref VPCSecurityGroupIds
+      Tracing: Active
+      Events:
+        EmailChangeOPTIONS:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: options
+            RestApiId: 
+              Ref: UKBDChangeEmailApi
+
+  ChangeEmailDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      DelaySeconds: 0
+      KmsDataKeyReusePeriodSeconds: 300
+      KmsMasterKeyId: !Join [ ":", [ "arn:aws:kms", !Ref AWS::Region, !Ref AWS::AccountId, 'alias/UKBD-Functional-Secrets-EncryptionKey'] ]
+      MaximumMessageSize: 262144
+      MessageRetentionPeriod: 345600
+      QueueName: !Join [ "", [ "Change-Email", !Ref StackCode, "-DLQ"] ]
+      ReceiveMessageWaitTimeSeconds: 0
+      VisibilityTimeout: 30
